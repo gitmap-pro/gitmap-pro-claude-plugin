@@ -1,25 +1,22 @@
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
-    ],
-    "PreToolUse": [
-      { "matcher": "Task", "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }
     ],
     "PostToolUse": [
-      { "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Task", "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+      { "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob", "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }
     ],
     "SubagentStart": [
-      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }
     ],
     "SubagentStop": [
-      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }
     ],
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }
     ]
   }
 }
