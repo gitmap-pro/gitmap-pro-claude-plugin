@@ -1,0 +1,12 @@
+{
+  "name": "gitmap-pro",
+  "description": "Gitmap agent presence and attention reporting for Claude Code.",
+  "owner": { "name": "gitmap-pro" },
+  "plugins": [
+    {
+      "name": "gitmap-pro",
+      "source": "./",
+      "description": "Report Claude Code agent presence and attention to your gitmap server."
+    }
+  ]
+}

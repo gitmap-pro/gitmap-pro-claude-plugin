@@ -1,0 +1,20 @@
+{
+  "name": "gitmap-pro",
+  "description": "Report Claude Code agent presence and attention to your gitmap server — live fleet view plus a durable log of which files your agents read, search, and edit.",
+  "author": { "name": "gitmap-pro" },
+  "userConfig": {
+    "server": {
+      "type": "string",
+      "title": "Gitmap server URL",
+      "description": "Base URL of your gitmap server, e.g. https://gitmap.pro",
+      "required": true
+    },
+    "token": {
+      "type": "string",
+      "title": "Gitmap API token",
+      "description": "A gm_ token with the events:write scope (Pro plan required)",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}

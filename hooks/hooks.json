@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Task", "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Task", "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+    ],
+    "SubagentStart": [
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+    ],
+    "SubagentStop": [
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/probe.py" }] }
+    ]
+  }
+}
