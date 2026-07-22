@@ -261,6 +261,17 @@ class TestPresenceActors:
         assert actor["meta"]["git_name"] == "Ada L (work laptop)"
         assert actor["meta"]["git_email"] == "ada@example.com"
 
+    def test_oversized_identity_truncated(self, env, repo, stub_server,
+                                          monkeypatch):
+        monkeypatch.setenv("GITMAP_NAME", "x" * 500)
+        run_hook(hook("SessionStart", repo, {"source": "startup"}))
+        assert wait_for(lambda: any(
+            r["path"].endswith("/actors") for r in stub_server.requests))
+        actor = [r for r in stub_server.requests
+                 if r["path"].endswith("/actors")][0]["body"]
+        assert len(actor["meta"]["git_name"]) == 120
+        assert len(json.dumps(actor["meta"])) <= 2048   # server meta cap
+
     def test_session_end_reason_in_clear_value(self, env, repo,
                                                stub_server):
         run_hook(hook("SessionEnd", repo, {"reason": "logout"}))

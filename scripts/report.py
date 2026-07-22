@@ -86,7 +86,8 @@ def git_ctx(cwd):
         cache = {}
     ent = cache.get(cwd)
     now = time.time()
-    if not ent or now - ent.get("at", 0) > 60:
+    if not ent or now - ent.get("at", 0) > 60 or (
+            ent.get("toplevel") and "git_name" not in ent):
         toplevel = (ent or {}).get("toplevel") or _git(
             cwd, "rev-parse", "--show-toplevel")
         if not toplevel:
@@ -277,16 +278,21 @@ def spool_touch(payload, ctx):
                                    "edit", p, lines, name, agent))
 
 
+IDENT_MAX = 120     # cap identity meta fields: an oversized value would
+                    # push meta past the server's 2KB limit and the bare
+                    # retry would then drop branch/worktree along with it
+
+
 def contributor_name(ctx):
     """Display name for the human behind this session; config beats git."""
     return (os.environ.get("GITMAP_NAME")
             or os.environ.get("CLAUDE_PLUGIN_OPTION_NAME")
-            or ctx.get("git_name", ""))
+            or ctx.get("git_name", ""))[:IDENT_MAX]
 
 
 def hostname():
     try:
-        return socket.gethostname()
+        return socket.gethostname()[:IDENT_MAX]
     except OSError:
         return ""
 
@@ -305,9 +311,9 @@ def presence_job(payload, ctx, event):
                           "branch": ctx.get("branch", ""),
                           "worktree": worktree,
                           "git_name": contributor_name(ctx),
-                          "git_email": ctx.get("git_email", ""),
+                          "git_email": ctx.get("git_email", "")[:IDENT_MAX],
                           "host": hostname(),
-                          "source": payload.get("source") or ""})
+                          "source": (payload.get("source") or "")[:IDENT_MAX]})
     if event == "SubagentStart":
         return dict(base, kind="start", ttl=PRESENCE_TTL, path="",
                     vstr="subagent: " + (payload.get("agent_type") or "?"),
