@@ -19,9 +19,10 @@ Captured via `scripts/probe.py` on a live headless session (Read/Grep/Glob/Edit 
 | `PostToolUse` Edit | `tool_input.file_path`, `tool_response.structuredPatch[].oldStart/oldLines` |
 | `PostToolUse` Write/NotebookEdit | `tool_input.file_path` (path-only) |
 | `SubagentStart`/`SubagentStop` | `agent_id`, `agent_type` |
-| `SessionEnd` | `reason` |
+| `SessionStart` | `source` (into actor meta) |
+| `SessionEnd` | `reason` (into the presence clear value, `"ended: <reason>"`) |
 
-Other observed-but-unused fields: `prompt_id`, `tool_use_id`, `duration_ms`, `permission_mode`, `effort`, `last_assistant_message`, `stop_hook_active`, `background_tasks`, `session_crons`, `agent_transcript_path`, SessionStart `source`.
+Other observed-but-unused fields: `prompt_id`, `tool_use_id`, `duration_ms`, `permission_mode`, `effort`, `last_assistant_message`, `stop_hook_active`, `background_tasks`, `session_crons`, `agent_transcript_path`.
 
 ## Consequences for the reporter (updates to the approved plan)
 

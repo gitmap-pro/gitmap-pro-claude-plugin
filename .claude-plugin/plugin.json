@@ -15,6 +15,12 @@
       "description": "A gm_ token with the events:write scope (Pro plan required)",
       "sensitive": true,
       "required": true
+    },
+    "name": {
+      "type": "string",
+      "title": "Contributor name",
+      "description": "Display name attached to your agents' activity on the map; defaults to git config user.name",
+      "required": false
     }
   }
 }

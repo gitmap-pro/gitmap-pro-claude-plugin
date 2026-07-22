@@ -14,12 +14,15 @@ swallows every error; the Claude session must never feel the server.
 Config: userConfig via CLAUDE_PLUGIN_OPTION_SERVER / _TOKEN, overridable by
 GITMAP_SERVER / GITMAP_TOKEN. Optional GITMAP_MAP skips repo resolution
 (escape hatch until /api/resolve-repo is deployed, and handy in tests).
+Optional GITMAP_NAME / CLAUDE_PLUGIN_OPTION_NAME overrides the contributor
+display name otherwise taken from git config user.name.
 Debug: GITMAP_HOOK_DEBUG=1 logs to ~/.cache/gitmap/agent-hook.log.
 
 Field contract: docs/probes.md (recorded from live payloads, 2026-07-21).
 """
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -73,8 +76,9 @@ def _git(cwd, *args):
 
 
 def git_ctx(cwd):
-    """Cached per-cwd: {toplevel, branch, origin}. Branch is refreshed when
-    stale (>60s) since it changes mid-session; toplevel/origin don't."""
+    """Cached per-cwd: {toplevel, branch, origin, git_name, git_email}.
+    Branch is refreshed when stale (>60s) since it changes mid-session;
+    toplevel/origin/identity don't."""
     cache_file = os.path.join(CACHE_DIR, "gitctx.json")
     try:
         cache = json.load(open(cache_file))
@@ -94,6 +98,10 @@ def git_ctx(cwd):
             "origin": (ent or {}).get("origin") or _git(
                 cwd, "remote", "get-url", "origin"),
             "branch": _git(cwd, "branch", "--show-current"),
+            "git_name": (ent or {}).get("git_name") or _git(
+                cwd, "config", "user.name"),
+            "git_email": (ent or {}).get("git_email") or _git(
+                cwd, "config", "user.email"),
             "at": now,
         }
         cache[cwd] = ent
@@ -269,6 +277,20 @@ def spool_touch(payload, ctx):
                                    "edit", p, lines, name, agent))
 
 
+def contributor_name(ctx):
+    """Display name for the human behind this session; config beats git."""
+    return (os.environ.get("GITMAP_NAME")
+            or os.environ.get("CLAUDE_PLUGIN_OPTION_NAME")
+            or ctx.get("git_name", ""))
+
+
+def hostname():
+    try:
+        return socket.gethostname()
+    except OSError:
+        return ""
+
+
 def presence_job(payload, ctx, event):
     """Build the presence part of a child job, or None."""
     aid = actor_id(payload)
@@ -281,14 +303,19 @@ def presence_job(payload, ctx, event):
                     actor_name=worktree or "claude-code",
                     meta={"harness": "claude-code",
                           "branch": ctx.get("branch", ""),
-                          "worktree": worktree})
+                          "worktree": worktree,
+                          "git_name": contributor_name(ctx),
+                          "git_email": ctx.get("git_email", ""),
+                          "host": hostname(),
+                          "source": payload.get("source") or ""})
     if event == "SubagentStart":
         return dict(base, kind="start", ttl=PRESENCE_TTL, path="",
                     vstr="subagent: " + (payload.get("agent_type") or "?"),
                     actor_name=payload.get("agent_type") or "subagent",
                     parent="cc-" + sess8(payload),
                     meta={"harness": "claude-code",
-                          "subagent_type": payload.get("agent_type") or ""})
+                          "subagent_type": payload.get("agent_type") or "",
+                          "host": hostname()})
     if event == "PostToolUse":
         ti = payload.get("tool_input") or {}
         p = rel_path(ti.get("file_path") or ti.get("notebook_path"),
@@ -300,7 +327,11 @@ def presence_job(payload, ctx, event):
     if event == "Stop":
         return dict(base, kind="beat", ttl=PRESENCE_TTL_STOP, path="",
                     vstr="idle")
-    if event in ("SubagentStop", "SessionEnd"):
+    if event == "SessionEnd":
+        reason = payload.get("reason") or ""
+        return dict(base, kind="clear", ttl=0, path="",
+                    vstr=("ended: " + reason) if reason else "")
+    if event == "SubagentStop":
         return dict(base, kind="clear", ttl=0, path="", vstr="")
     return None
 
@@ -348,6 +379,7 @@ def parent():
     if not pres and not do_flush:
         return                                   # spool-only: no fork
     spawn_child({"origin": ctx.get("origin", ""), "sess8": s8,
+                 "corr": (payload.get("session_id") or "")[:120],
                  "event": event, "presence": pres,
                  "flush": bool(do_flush),
                  "final": event == "SessionEnd"})
@@ -412,7 +444,7 @@ def child(jobfile):
         except OSError:
             touches = []
         agg = attention.aggregate(touches,
-                                  corr=(pres or {}).get("corr", "") or s8)
+                                  corr=job.get("corr") or s8)
         for e in agg:
             e["actor"] = "cc-" + s8
 
