@@ -69,6 +69,8 @@ def env(tmp_path, monkeypatch, stub_server):
                        "http://127.0.0.1:%d" % stub_server.server_address[1])
     monkeypatch.setenv("GITMAP_TOKEN", "gm_test")
     monkeypatch.delenv("GITMAP_MAP", raising=False)
+    monkeypatch.delenv("GITMAP_NAME", raising=False)
+    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_NAME", raising=False)
     return cache
 
 
@@ -81,6 +83,10 @@ def repo(tmp_path):
     subprocess.run(["git", "init", "-q", "-b", "work"], cwd=d, check=True)
     subprocess.run(["git", "remote", "add", "origin",
                     "https://github.com/acme/myrepo.git"], cwd=d, check=True)
+    subprocess.run(["git", "config", "user.name", "Ada Lovelace"],
+                   cwd=d, check=True)
+    subprocess.run(["git", "config", "user.email", "ada@example.com"],
+                   cwd=d, check=True)
     (d / "src").mkdir()
     (d / "src" / "app.py").write_text("print('hi')\n")
     return d

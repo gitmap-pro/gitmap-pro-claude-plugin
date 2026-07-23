@@ -3,6 +3,7 @@ through report.py as a real subprocess, assert exact requests at the stub
 events API and exact spool state on disk."""
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -194,6 +195,26 @@ class TestFlush:
         assert len([r for r in stub_server.requests
                     if r["method"] == "POST"]) == n_posts
 
+    def test_flush_only_batch_carries_full_corr(self, env, repo,
+                                                stub_server):
+        # A size-triggered flush from a spool-only hook (Read: no presence
+        # beat) must still stamp the full session id, not sess8.
+        spool_dir = str(env / "attention")
+        for _ in range(attention.FLUSH_LINE_THRESHOLD + 1):
+            attention.append_touch(spool_dir, SESS[:8],
+                                   attention.encode_touch(
+                                       "read", "src/app.py", None,
+                                       "Read", ""))
+        run_hook(hook("PostToolUse", repo, read_fixture(repo)))
+        assert wait_for(lambda: any(
+            e["type"] == "attention.read"
+            for e in posted_events(stub_server)))
+        att = [e for e in posted_events(stub_server)
+               if e["type"] == "attention.read"]
+        assert att[0]["corr"] == SESS[:120]
+        assert not any(e["type"] == "presence.working"
+                       for e in posted_events(stub_server))
+
     def test_flush_capped_at_five_posts(self, env, repo, stub_server):
         spool_dir = str(env / "attention")
         for i in range(130):
@@ -224,6 +245,41 @@ class TestPresenceActors:
         assert actor["meta"]["harness"] == "claude-code"
         assert actor["meta"]["branch"] == "work"
         assert actor["meta"]["worktree"] == "wt"
+        assert actor["meta"]["git_name"] == "Ada Lovelace"
+        assert actor["meta"]["git_email"] == "ada@example.com"
+        assert actor["meta"]["host"] == socket.gethostname()
+        assert actor["meta"]["source"] == "startup"
+
+    def test_name_option_overrides_git_identity(self, env, repo,
+                                                stub_server, monkeypatch):
+        monkeypatch.setenv("GITMAP_NAME", "Ada L (work laptop)")
+        run_hook(hook("SessionStart", repo, {"source": "resume"}))
+        assert wait_for(lambda: any(
+            r["path"].endswith("/actors") for r in stub_server.requests))
+        actor = [r for r in stub_server.requests
+                 if r["path"].endswith("/actors")][0]["body"]
+        assert actor["meta"]["git_name"] == "Ada L (work laptop)"
+        assert actor["meta"]["git_email"] == "ada@example.com"
+
+    def test_oversized_identity_truncated(self, env, repo, stub_server,
+                                          monkeypatch):
+        monkeypatch.setenv("GITMAP_NAME", "x" * 500)
+        run_hook(hook("SessionStart", repo, {"source": "startup"}))
+        assert wait_for(lambda: any(
+            r["path"].endswith("/actors") for r in stub_server.requests))
+        actor = [r for r in stub_server.requests
+                 if r["path"].endswith("/actors")][0]["body"]
+        assert len(actor["meta"]["git_name"]) == 120
+        assert len(json.dumps(actor["meta"])) <= 2048   # server meta cap
+
+    def test_session_end_reason_in_clear_value(self, env, repo,
+                                               stub_server):
+        run_hook(hook("SessionEnd", repo, {"reason": "logout"}))
+        assert wait_for(lambda: any(
+            e["ttl"] == 0 for e in posted_events(stub_server)))
+        clear = [e for e in posted_events(stub_server) if e["ttl"] == 0][0]
+        assert clear["value"] == "ended: logout"
+        assert clear["corr"] == SESS[:120]
 
     def test_subagent_lifecycle(self, env, repo, stub_server):
         run_hook(hook("SubagentStart", repo, agent="abcd1234efgh"))
@@ -233,6 +289,7 @@ class TestPresenceActors:
                  if r["path"].endswith("/actors")][0]["body"]
         assert actor["id"] == "cc-%s-sub-abcd1234" % SESS[:8]
         assert actor["parent"] == "cc-" + SESS[:8]
+        assert actor["meta"]["host"] == socket.gethostname()
         run_hook(hook("SubagentStop", repo, agent="abcd1234efgh"))
         assert wait_for(lambda: any(
             e["ttl"] == 0 and e["actor"].endswith("-sub-abcd1234")
