@@ -261,6 +261,10 @@ def spool_touch(payload, ctx):
         patch = (payload.get("tool_response") or {}) if isinstance(
             payload.get("tool_response"), dict) else {}
         hunks = patch.get("structuredPatch")
+        # Opt-in live code content: the edited text travels to the server for
+        # the live-glyph overlay / session replay. Off by default -- source text
+        # only leaves the machine when GITMAP_LIVE_CONTENT=1 is set.
+        want_content = os.environ.get("GITMAP_LIVE_CONTENT") == "1"
         if isinstance(hunks, list):
             for h in hunks:
                 try:
@@ -271,6 +275,16 @@ def spool_touch(payload, ctx):
                 attention.append_touch(SPOOL_DIR, sess8(payload),
                                        attention.encode_touch(
                                            "edit", p, [a, b], name, agent))
+                if want_content:
+                    added = [ln[1:] for ln in (h.get("lines") or [])
+                             if isinstance(ln, str) and ln.startswith("+")]
+                    try:
+                        ns = int(h["newStart"])
+                    except (KeyError, TypeError, ValueError):
+                        ns = None
+                    if added and ns is not None:
+                        attention.append_content(SPOOL_DIR, sess8(payload),
+                                                 attention.encode_content(p, ns, added))
             if hunks:
                 return
         attention.append_touch(SPOOL_DIR, sess8(payload),
@@ -454,10 +468,24 @@ def child(jobfile):
         for e in agg:
             e["actor"] = "cc-" + s8
 
+    # opt-in live code content: its own spool, posted verbatim (not rolled up).
+    # A failed/overflowed content post is simply dropped -- it's a real-time
+    # overlay, so a stale live delta isn't worth retrying.
+    content_claim, content_evs = None, []
+    if job.get("flush"):
+        content_claim = attention.claim(attention.content_spool_path(SPOOL_DIR, s8))
+    if content_claim:
+        try:
+            with open(content_claim) as f:
+                content_evs = attention.content_events(
+                    f.read(), "cc-" + s8, job.get("corr") or s8)
+        except OSError:
+            content_evs = []
+
     # presence goes first, then attention rollups biggest-first; one budget
     # (≤ POSTS_PER_FLUSH requests) covers both so a fat flush can't stack
     # an extra presence request on top.
-    batches, dropped = attention.split_batches(events + agg)
+    batches, dropped = attention.split_batches(events + agg + content_evs)
     if dropped:
         dropped_keys = {(e["type"], e["anchor"].get("path", ""))
                         for e in dropped}
@@ -487,6 +515,9 @@ def child(jobfile):
                 dlog("flush dropped (auth/plan)")
             else:
                 attention.unclaim(claim_path, all_lines)  # retry later
+
+    if content_claim:
+        attention.unclaim(content_claim, None)   # live content: never re-spooled
 
     if job.get("final"):
         for p in (spool, spool + ".last-flush"):
