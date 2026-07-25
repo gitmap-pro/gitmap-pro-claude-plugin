@@ -53,6 +53,66 @@ def append_touch(spool_dir, sess8, encoded_line):
         os.close(fd)
 
 
+# --- live code content (content.delta): opt-in, carries edited text ---
+# A separate spool from the attention touches: decode_lines() drops these (they
+# aren't attention counts), and the child posts them verbatim, not aggregated.
+CONTENT_TEXT_MAX = 6000     # keep a content.delta's serialized payload < 8192
+
+
+def content_spool_path(spool_dir, sess8):
+    return os.path.join(spool_dir, "%s.content.jsonl" % sess8)
+
+
+def encode_content(path, start, text):
+    return json.dumps({"t": round(time.time(), 3), "p": path,
+                       "start": int(start), "text": [str(x) for x in text]},
+                      separators=(",", ":"))
+
+
+def append_content(spool_dir, sess8, encoded_line):
+    os.makedirs(spool_dir, exist_ok=True)
+    fd = os.open(content_spool_path(spool_dir, sess8),
+                 os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, (encoded_line + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def content_events(text, actor, corr):
+    """Parse a content spool into content.delta events: newest edit per path
+    wins, text truncated to keep the payload under the server's cap."""
+    latest = {}
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("p") and isinstance(d.get("text"), list):
+            latest[d["p"]] = d          # last write for a path wins
+    events = []
+    for p, d in latest.items():
+        kept, used = [], 0
+        for ln in d["text"]:
+            ln = str(ln)
+            used += len(ln) + 1
+            if used > CONTENT_TEXT_MAX:
+                break
+            kept.append(ln)
+        if not kept:
+            continue
+        start = max(1, int(d.get("start") or 1))
+        events.append({"type": "content.delta", "actor": actor,
+                       "anchor": {"path": p,
+                                  "lines": [start, start + len(kept) - 1]},
+                       "corr": corr,
+                       "payload": {"start": start, "text": kept}})
+    return events
+
+
 def decode_lines(text):
     out = []
     for raw in text.splitlines():

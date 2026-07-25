@@ -11,6 +11,45 @@ def touch(k="read", p="a.py", l=None, tool="Read", agent="", t=1000.0,
     return d
 
 
+class TestContentDelta:
+    def test_roundtrip_spool_to_events(self, tmp_path):
+        d = str(tmp_path)
+        attention.append_content(d, "sess1234",
+                                 attention.encode_content("a.py", 3, ["x = 1", "y = 2"]))
+        with open(attention.content_spool_path(d, "sess1234")) as f:
+            evs = attention.content_events(f.read(), "cc-sess1234", "corr9")
+        assert len(evs) == 1
+        e = evs[0]
+        assert e["type"] == "content.delta" and e["actor"] == "cc-sess1234"
+        assert e["payload"] == {"start": 3, "text": ["x = 1", "y = 2"]}
+        assert e["anchor"] == {"path": "a.py", "lines": [3, 4]}
+        assert e["corr"] == "corr9"
+
+    def test_newest_edit_per_path_wins(self):
+        text = "\n".join([
+            attention.encode_content("a.py", 1, ["old"]),
+            attention.encode_content("a.py", 1, ["new"]),
+            attention.encode_content("b.py", 5, ["b"]),
+        ])
+        evs = {e["anchor"]["path"]: e for e in
+               attention.content_events(text, "cc-x", "c")}
+        assert evs["a.py"]["payload"]["text"] == ["new"]
+        assert set(evs) == {"a.py", "b.py"}
+
+    def test_text_truncated_under_cap(self):
+        big = ["z" * 400 for _ in range(50)]      # ~20KB of text
+        text = attention.encode_content("a.py", 1, big)
+        evs = attention.content_events(text, "cc-x", "c")
+        kept = evs[0]["payload"]["text"]
+        assert 0 < len(kept) < 50                 # truncated to fit the payload cap
+        assert sum(len(x) + 1 for x in kept) <= attention.CONTENT_TEXT_MAX
+
+    def test_decode_lines_ignores_content_spool(self):
+        # content records must not leak into the attention rollup path
+        text = attention.encode_content("a.py", 1, ["x"])
+        assert attention.decode_lines(text) == []
+
+
 class TestMergeRanges:
     def test_coalesces_overlap_and_adjacent(self):
         merged, trunc = attention.merge_ranges([[5, 10], [11, 20], [8, 12],
