@@ -49,6 +49,12 @@ def content_spool_of(cache):
     return attention.content_spool_path(str(cache / "attention"), SESS[:8])
 
 
+def stamp_of(cache):
+    """The successful-flush stamp. Written *after* the POST it belongs to, so
+    tests must gate on the stamp itself rather than on the request landing."""
+    return str(cache / "attention" / ("%s.last-flush" % SESS[:8]))
+
+
 class TestBatchIsolation:
     def test_content_never_shares_a_request_with_attention(
             self, env, repo, stub_server, live_content):
@@ -97,24 +103,22 @@ class TestRejectingServer:
         rejected = [p for p in event_posts(stub_server) if CONTENT in p]
         assert rejected and all(set(p) == {CONTENT} for p in rejected)
         # attention flushed clean: spool consumed, not re-spooled for retry
-        assert wait_for(lambda: not os.path.exists(spool_of(env)))
-        assert wait_for(lambda: not os.path.exists(content_spool_of(env)))
-        assert os.path.exists(str(env / "attention" /
-                                  ("%s.last-flush" % SESS[:8])))
+        assert wait_for(lambda: os.path.exists(stamp_of(env)))
+        assert not os.path.exists(spool_of(env))
+        assert not os.path.exists(content_spool_of(env))
 
     def test_second_flush_is_not_a_replay_of_the_first(
             self, env, repo, stub_server, live_content):
         stub_server.reject_types = {CONTENT}
         run_hook(edit_hook(repo))
         run_hook(hook("Stop", repo))
-        assert wait_for(lambda: any("attention.edit" in p
-                                    for p in event_posts(stub_server)))
+        assert wait_for(lambda: os.path.exists(stamp_of(env)))
         n_edits = sum(p.count("attention.edit")
                       for p in event_posts(stub_server))
         assert n_edits == 1
         # a later flush carries only what was spooled since — nothing is
         # stuck in an endless re-spool loop
-        os.remove(str(env / "attention" / ("%s.last-flush" % SESS[:8])))
+        os.remove(stamp_of(env))           # skip the 5-min Stop throttle
         run_hook(edit_hook(repo, path="src/other.py"))
         run_hook(hook("Stop", repo))
         assert wait_for(lambda: sum(p.count("attention.edit")
