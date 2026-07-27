@@ -18,7 +18,8 @@ Optional GITMAP_NAME / CLAUDE_PLUGIN_OPTION_NAME overrides the contributor
 display name otherwise taken from git config user.name.
 Debug: GITMAP_HOOK_DEBUG=1 logs to ~/.cache/gitmap/agent-hook.log.
 
-Field contract: docs/probes.md (recorded from live payloads, 2026-07-21).
+Field contract: docs/probes.md (recorded from live payloads, 2026-07-21;
+re-probed 2026-07-27 against Claude Code 2.1.220).
 """
 import json
 import os
@@ -41,6 +42,9 @@ RESOLVE_TTL_NEG = 900
 CONNECT_TIMEOUT = 3.0
 PRESENCE_TTL = 300
 PRESENCE_TTL_STOP = 120
+MODEL_TTL = 300         # /model switches mid-session: re-resolve every 5 min
+MODEL_TTL_NEG = 60      # nothing resolved yet (empty transcript): retry sooner
+TRANSCRIPT_TAIL = 64 * 1024
 
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 SEARCH_TOOLS = ("Grep", "Glob")
@@ -311,23 +315,151 @@ def hostname():
         return ""
 
 
+def worktree_of(ctx):
+    return os.path.basename(ctx["toplevel"]) if ctx["toplevel"] else ""
+
+
+def session_meta(payload, ctx):
+    """Full root-actor meta, built parent-side (no I/O beyond the cached git
+    ctx). The child adds `model` — the only field it can't resolve without
+    reading the transcript. Always sent whole: the server replaces meta
+    wholesale, so a partial send would drop worktree/branch/identity."""
+    return {"harness": "claude-code",
+            "branch": ctx.get("branch", ""),
+            "worktree": worktree_of(ctx),
+            "git_name": contributor_name(ctx),
+            "git_email": ctx.get("git_email", "")[:IDENT_MAX],
+            "host": hostname(),
+            "source": (payload.get("source") or "")[:IDENT_MAX]}
+
+
+# ----------------------------------------------------------------- model
+# Child-side only: the parent must stay fork-free and file-scan-free.
+# Probed 2026-07-27 (Claude Code 2.1.220): hook payloads still carry no
+# model field, so the transcript is the real source. See docs/probes.md.
+
+def transcript_model(path, window=TRANSCRIPT_TAIL):
+    """Newest assistant `message.model` in the tail of a transcript jsonl.
+
+    Reads the last `window` bytes and walks backwards; a seek into the middle
+    of a record tears one line, which simply fails to parse and is skipped.
+    Sidechain (subagent) lines are ignored so the root actor reports the
+    session's own model. Widens once when a fat tool result crowded every
+    assistant line out of the window."""
+    if not path:
+        return ""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(max(0, size - window))
+            tail = f.read()
+    except OSError:
+        return ""
+    for raw in reversed(tail.decode("utf-8", "replace").splitlines()):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(d, dict) or d.get("type") != "assistant" \
+                or d.get("isSidechain"):
+            continue
+        msg = d.get("message")
+        if isinstance(msg, dict) and msg.get("model"):
+            return str(msg["model"])[:IDENT_MAX]
+    if size > window and window < 4 * TRANSCRIPT_TAIL:
+        return transcript_model(path, window * 4)
+    return ""
+
+
+def resolve_model(sess8_, hint, transcript_path):
+    """Layered: hook payload > ANTHROPIC_MODEL > transcript tail. Cached per
+    session because /model can switch mid-session; "" is cached too (briefly)
+    so an empty transcript doesn't re-scan on every flush."""
+    cache_file = os.path.join(CACHE_DIR, "model.%s.json" % sess8_)
+    try:
+        ent = json.load(open(cache_file))
+    except (OSError, ValueError):
+        ent = {}
+    if isinstance(ent, dict):
+        ttl = MODEL_TTL if ent.get("model") else MODEL_TTL_NEG
+        if time.time() - ent.get("at", 0) < ttl:
+            return ent.get("model") or ""
+    model = (str(hint or "").strip()
+             or os.environ.get("ANTHROPIC_MODEL", "").strip())[:IDENT_MAX]
+    if not model:
+        model = transcript_model(transcript_path)
+    _write_json(cache_file, {"model": model, "at": time.time()})
+    return model
+
+
+# --------------------------------------------------------- meta refresh
+# SessionStart is the only hook that registers the root actor, but branch
+# (git checkout) and model (/model) both change mid-session. The child keeps
+# a stamp of the last meta it managed to deliver and re-POSTs /actors when
+# either drifts -- always the whole meta object, never a patch.
+
+def _meta_stamp_path(sess8_):
+    return os.path.join(CACHE_DIR, "actor-meta.%s.json" % sess8_)
+
+
+DRIFT_KEYS = ("branch", "model")
+
+
+def stamp_meta(sess8_, meta, ok=True):
+    _write_json(_meta_stamp_path(sess8_),
+                {"meta": meta, "at": time.time(), "ok": bool(ok)})
+
+
+def refresh_actor_meta(server, token, base, sess8_, actor_name, meta):
+    """Re-register the root actor when {branch, model} drifted. No-op (one
+    small file read) in the common case."""
+    if not meta:
+        return
+    try:
+        last = json.load(open(_meta_stamp_path(sess8_)))
+    except (OSError, ValueError):
+        last = {}
+    if not isinstance(last, dict):
+        last = {}
+    prev = last.get("meta") if isinstance(last.get("meta"), dict) else {}
+    # Fields only a SessionStart payload knows (`source`) would come out
+    # blank here, and meta is replaced wholesale -- so keep the last value
+    # sent for anything the current hook can't see. Never for the drift
+    # keys: those are always authoritative.
+    for k, v in prev.items():
+        if k not in DRIFT_KEYS and not meta.get(k):
+            meta[k] = v
+    if last.get("ok") and all((prev.get(k) or "") == (meta.get(k) or "")
+                              for k in DRIFT_KEYS):
+        return
+    if not last.get("ok", True) and \
+            time.time() - last.get("at", 0) < MODEL_TTL_NEG:
+        return                     # a server that won't take meta: back off
+    ok = http(server, token, "POST", base + "/actors",
+              {"id": "cc-" + sess8_, "name": actor_name, "kind": "agent",
+               "emoji": "🤖", "meta": meta}) is not None
+    stamp_meta(sess8_, meta, ok)
+    dlog("meta refresh %s ok=%s" % (sess8_, ok))
+
+
 def presence_job(payload, ctx, event):
-    """Build the presence part of a child job, or None."""
+    """Build the presence part of a child job, or None. `branch` rides every
+    presence event as payload.branch: that is what drives the server's trail
+    branch-transition rows."""
     aid = actor_id(payload)
     base = {"actor": aid, "session": sess8(payload),
-            "corr": (payload.get("session_id") or "")[:120]}
-    worktree = os.path.basename(ctx["toplevel"]) if ctx["toplevel"] else ""
+            "corr": (payload.get("session_id") or "")[:120],
+            "branch": ctx.get("branch", "")}
+    worktree = worktree_of(ctx)
     if event == "SessionStart":
+        # meta comes from the job (job["meta"]) so the child can stamp model
+        # onto the same object it uses for later drift re-registration.
         return dict(base, kind="start", ttl=PRESENCE_TTL, path="",
                     vstr="session started",
-                    actor_name=worktree or "claude-code",
-                    meta={"harness": "claude-code",
-                          "branch": ctx.get("branch", ""),
-                          "worktree": worktree,
-                          "git_name": contributor_name(ctx),
-                          "git_email": ctx.get("git_email", "")[:IDENT_MAX],
-                          "host": hostname(),
-                          "source": (payload.get("source") or "")[:IDENT_MAX]})
+                    actor_name=worktree or "claude-code")
     if event == "SubagentStart":
         return dict(base, kind="start", ttl=PRESENCE_TTL, path="",
                     vstr="subagent: " + (payload.get("agent_type") or "?"),
@@ -402,10 +534,28 @@ def parent():
                  "corr": (payload.get("session_id") or "")[:120],
                  "event": event, "presence": pres,
                  "flush": bool(do_flush),
-                 "final": event == "SessionEnd"})
+                 "final": event == "SessionEnd",
+                 # every job carries the whole root meta + the inputs the
+                 # child needs to resolve model, so any child can notice
+                 # {branch, model} drift and re-register the root actor.
+                 "meta": session_meta(payload, ctx),
+                 "actor_name": worktree_of(ctx) or "claude-code",
+                 "transcript": payload.get("transcript_path") or "",
+                 "model_hint": payload.get("model") or ""})
 
 
 # ------------------------------------------------------------- hook child
+
+def purge_session_files(spool, sess8_):
+    """Session over: drop its spool and its per-session caches."""
+    for p in (spool, spool + ".last-flush",
+              os.path.join(CACHE_DIR, "model.%s.json" % sess8_),
+              _meta_stamp_path(sess8_)):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
 
 def child(jobfile):
     try:
@@ -423,33 +573,49 @@ def child(jobfile):
     spool = attention.spool_path(SPOOL_DIR, s8)
     if not mapname:
         if mapname == "" and job.get("final"):
-            for p in (spool, spool + ".last-flush"):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+            purge_session_files(spool, s8)
         dlog("no map for %s" % job.get("origin", ""))
         return
     base = "/maps/%s" % mapname
 
+    meta = dict(job.get("meta") or {})
+    model = resolve_model(s8, job.get("model_hint"), job.get("transcript"))
+    if model:
+        meta["model"] = model
+
     pres = job.get("presence")
     events = []
+    root_sent = False
     if pres:
         if pres.get("kind") == "start":
             actor = {"id": pres["actor"], "name": pres.get("actor_name", ""),
                      "kind": "agent", "emoji": "🤖"}
             if pres.get("parent"):
                 actor["parent"] = pres["parent"]
-            if pres.get("meta"):
-                actor["meta"] = pres["meta"]
+            # subagents carry their own (thinner) meta; the root actor uses
+            # the job's full meta so both paths write the same shape.
+            amet = dict(pres.get("meta") or meta)
+            if model:
+                amet["model"] = model
+            if amet:
+                actor["meta"] = amet
             if http(server, token, "POST", base + "/actors", actor) is None:
                 # pre-D2 server may 400 on parent/meta: retry bare once
                 http(server, token, "POST", base + "/actors",
                      {k: actor[k] for k in ("id", "name", "kind", "emoji")})
-        events.append({"type": "presence.working", "actor": pres["actor"],
-                       "anchor": {"path": pres["path"]} if pres["path"]
-                       else {}, "value": pres.get("vstr", ""),
-                       "corr": pres.get("corr", ""), "ttl": pres["ttl"]})
+            elif not pres.get("parent"):
+                root_sent = True
+                stamp_meta(s8, meta)
+        ev = {"type": "presence.working", "actor": pres["actor"],
+              "anchor": {"path": pres["path"]} if pres["path"] else {},
+              "value": pres.get("vstr", ""), "corr": pres.get("corr", ""),
+              "ttl": pres["ttl"]}
+        if pres.get("branch"):
+            ev["payload"] = {"branch": pres["branch"]}
+        events.append(ev)
+    if not root_sent:
+        refresh_actor_meta(server, token, base, s8,
+                           job.get("actor_name", ""), meta)
 
     leftover = []
     claim_path = None
@@ -520,11 +686,7 @@ def child(jobfile):
         attention.unclaim(content_claim, None)   # live content: never re-spooled
 
     if job.get("final"):
-        for p in (spool, spool + ".last-flush"):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+        purge_session_files(spool, s8)
     else:
         attention.enforce_bounds(spool)
         for orphan in attention.sweep(SPOOL_DIR, s8):

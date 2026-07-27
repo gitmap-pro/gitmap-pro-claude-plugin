@@ -2,6 +2,8 @@
 
 Captured via `scripts/probe.py` on a live headless session (Read/Grep/Glob/Edit + one general-purpose subagent). Raw capture: 13 events. These findings are the contract P1's parser is written against.
 
+The probe script was replaced by `report.py` in P1; to re-run it, restore it with `git show fa7ee56:scripts/probe.py > /tmp/probe.py`, point a throwaway `--settings` file's hooks at it, and drive one headless `claude -p` session in a scratch git repo.
+
 ## Probe answers
 
 1. **PostToolUse fires for tool calls made inside subagents, and the payload carries `agent_id` + `agent_type`** (e.g. `agent_id: "a66808bf…"`, `agent_type: "general-purpose"`). Main-session tool calls carry no `agent_id` key. → Per-touch subagent attribution is possible; spool lines record `agent` when present.
@@ -23,6 +25,17 @@ Captured via `scripts/probe.py` on a live headless session (Read/Grep/Glob/Edit 
 | `SessionEnd` | `reason` (into the presence clear value, `"ended: <reason>"`) |
 
 Other observed-but-unused fields: `prompt_id`, `tool_use_id`, `duration_ms`, `permission_mode`, `effort`, `last_assistant_message`, `stop_hook_active`, `background_tasks`, `session_crons`, `agent_transcript_path`.
+
+## Re-probe 2026-07-27 (Claude Code 2.1.220) — model capture
+
+Same method, 9 events (SessionStart, 4 × PostToolUse, SubagentStart/Stop, Stop, SessionEnd) driven with `--model sonnet`.
+
+1. **Still no `model` anywhere in a hook payload**, and no model-bearing env var reaches hook processes (`CLAUDE_*` gives entrypoint, session id, pid, effort, project dir — nothing about the model). The layered resolver keeps the payload key first anyway, so a future Claude Code that adds one is picked up without a code change.
+2. **`transcript_path` is present on every event**, including events fired inside a subagent — it always points at the *root session* transcript. That makes it a usable model source from any hook, not just the ones that carry a `source`.
+3. **Transcript lines**: `{"type": "assistant", "message": {"model": "claude-sonnet-5", …}, "isSidechain": bool, "gitBranch": …}`, one JSON object per line, appended. Newest assistant line = current model, so a bounded tail read (64KB, widened once) answers it without parsing the whole file. Subagent turns land in a *separate* file (`<session>/subagents/agent-<id>.jsonl`) in this version, but `isSidechain` has meant "not the root model" historically — the scan skips those lines either way.
+4. **`agent_transcript_path`** appears only on `SubagentStop` — too late to give a subagent its own model at registration, so subagent meta reports the session model.
+5. `agent_id` is longer than 8 chars (`a0abb4ddf717a5138`); actor ids keep using the first 8, unchanged.
+6. `SessionStart` is still the only payload carrying `source` — a later hook can't reconstruct it, which is why the meta refresh carries forward the last value it sent rather than blanking the field.
 
 ## Consequences for the reporter (updates to the approved plan)
 

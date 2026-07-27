@@ -71,6 +71,7 @@ def env(tmp_path, monkeypatch, stub_server):
     monkeypatch.delenv("GITMAP_MAP", raising=False)
     monkeypatch.delenv("GITMAP_NAME", raising=False)
     monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_NAME", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     return cache
 
 
