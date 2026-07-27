@@ -32,6 +32,12 @@ class StubEventsAPI(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(n)) if n else {}
         self._record(body)
         code = self.server.post_status
+        types = {e.get("type") for e in body.get("events", [])}
+        if types & self.server.reject_types:
+            # how the real server answers a batch holding an event type it
+            # doesn't know: the whole batch 400s, known types included
+            self._json({"error": "unknown event type"}, 400)
+            return
         if code >= 400:
             self._json({"error": "stub says %d" % code}, code)
         else:
@@ -54,6 +60,7 @@ def stub_server():
     srv.requests = []
     srv.map_name = "myrepo"
     srv.post_status = 200
+    srv.reject_types = set()
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     yield srv

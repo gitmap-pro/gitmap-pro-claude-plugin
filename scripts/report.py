@@ -651,7 +651,7 @@ def child(jobfile):
     # presence goes first, then attention rollups biggest-first; one budget
     # (≤ POSTS_PER_FLUSH requests) covers both so a fat flush can't stack
     # an extra presence request on top.
-    batches, dropped = attention.split_batches(events + agg + content_evs)
+    batches, dropped = attention.split_batches(events + agg)
     if dropped:
         dropped_keys = {(e["type"], e["anchor"].get("path", ""))
                         for e in dropped}
@@ -665,6 +665,23 @@ def child(jobfile):
                 {"events": body}) is None:
             ok = False
             break
+
+    # content.delta rides its own requests, after the batches above and only
+    # with what's left of the flush budget. The server rejects a whole batch
+    # when it doesn't know one event type in it, so mixing content into the
+    # attention batches would make a server without content.delta support
+    # fail the attention flush too -- and those get re-spooled, so every
+    # later flush would fail the same way. Isolated, a rejection costs only
+    # the content events, which are droppable by design.
+    if content_evs and ok:
+        cbatches, _ = attention.split_batches(
+            content_evs, post_max=max(attention.POSTS_PER_FLUSH
+                                      - len(batches), 0))
+        for body in cbatches:
+            if http(server, token, "POST", base + "/events",
+                    {"events": body}) is None:
+                dlog("content batch rejected: %d deltas dropped" % len(body))
+                break
 
     if claim_path:
         if ok:
