@@ -4,7 +4,13 @@
       { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }
     ],
     "PostToolUse": [
-      { "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob", "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }
+      { "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash", "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }
+    ],
+    "Notification": [
+      { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }
     ],
     "SubagentStart": [
       { "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/scripts/report.py" }] }

@@ -17,10 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import report  # noqa: E402
 
-TYPE_DEF = {"name": "attention.focus", "kind": "durable",
-            "value_type": "string",
-            "descr": "an agent's stated focus: what it is working on at the "
-                     "anchor and why (the value is the note text)"}
+TYPE_DEF = report.FOCUS_TYPE_DEF     # one definition; report.py owns it
 
 
 def main():

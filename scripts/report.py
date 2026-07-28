@@ -33,6 +33,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import attention  # noqa: E402
+import outcomes  # noqa: E402
 
 CACHE_DIR = os.path.expanduser(os.environ.get("GITMAP_HOOK_CACHE",
                                               "~/.cache/gitmap"))
@@ -445,6 +446,135 @@ def refresh_actor_meta(server, token, base, sess8_, actor_name, meta):
     dlog("meta refresh %s ok=%s" % (sess8_, ok))
 
 
+# ------------------------------------------------------------- outcomes
+# codemap#267: sessions should carry intent and outcomes, not just motion.
+# The goal line (attention.focus), task.status transitions, test verdicts
+# (sweep.completed) and landed commits (vcs.commit) are all derived from
+# what the hooks already see. State lives in small per-session stamp files
+# so each short-lived hook process knows what earlier ones posted.
+
+FOCUS_TYPE_DEF = {"name": "attention.focus", "kind": "durable",
+                  "value_type": "string",
+                  "descr": "an agent's stated focus: what it is working on "
+                           "at the anchor and why (the value is the note "
+                           "text)"}
+
+
+def _stamp(name, sess8_):
+    return os.path.join(CACHE_DIR, "%s.%s.json" % (name, sess8_))
+
+
+def _load_stamp(name, sess8_):
+    try:
+        d = json.load(open(_stamp(name, sess8_)))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def intent_enabled():
+    """Prompt-derived goal lines are on by default; GITMAP_INTENT=0 keeps
+    prompt text off the map entirely (lifecycle statuses still flow)."""
+    return os.environ.get("GITMAP_INTENT") != "0"
+
+
+def _transition(payload, kind):
+    """task.status event for this lifecycle moment, or None. Dedupe rides
+    the status stamp so repeated hooks post each transition once."""
+    s8 = sess8(payload)
+    nxt = outcomes.next_status(_load_stamp("status", s8).get("value"), kind)
+    if not nxt:
+        return None
+    _write_json(_stamp("status", s8), {"value": nxt, "at": time.time()})
+    ev = {"type": "task.status", "actor": "cc-" + s8, "anchor": {},
+          "value": nxt, "corr": (payload.get("session_id") or "")[:120]}
+    goal = _load_stamp("intent", s8).get("line", "")
+    if goal:
+        ev["payload"] = {"subtype": goal}
+    return ev
+
+
+def seed_head(cwd, ctx, sess8_):
+    """Remember HEAD per worktree so commit checks only ever report what
+    moved during this session."""
+    if not ctx.get("toplevel"):
+        return
+    heads = _load_stamp("head", sess8_)
+    if ctx["toplevel"] not in heads:
+        heads[ctx["toplevel"]] = _git(cwd, "rev-parse", "HEAD")
+        _write_json(_stamp("head", sess8_), heads)
+
+
+def prompt_events(payload):
+    """First real prompt of the session: the goal line + started."""
+    evs = []
+    s8 = sess8(payload)
+    if intent_enabled() and not _load_stamp("intent", s8):
+        line = outcomes.intent_line(payload.get("prompt"))
+        if line:
+            _write_json(_stamp("intent", s8),
+                        {"line": line, "at": time.time()})
+            evs.append({"type": "attention.focus", "actor": "cc-" + s8,
+                        "anchor": {}, "value": line,
+                        "corr": (payload.get("session_id") or "")[:120]})
+    tr = _transition(payload, "prompt")
+    if tr:
+        evs.append(tr)
+    return evs
+
+
+def bash_events(payload, ctx):
+    """Outcomes visible in one Bash call: a PR opened, a test run's verdict,
+    a commit that landed. Returns (events, commit_events) — vcs.commit is a
+    newer builtin than the rest, so the child posts it isolated (an unknown
+    type 400s its whole batch on an older server)."""
+    cmd = outcomes.command_of(payload.get("tool_input"))
+    if not cmd:
+        return [], []
+    evs, commits = [], []
+    corr = (payload.get("session_id") or "")[:120]
+    s8 = sess8(payload)
+    if outcomes.PR_CREATE_RX.search(cmd) and "/pull/" in \
+            outcomes.response_text(payload.get("tool_response")):
+        tr = _transition(payload, "pr")   # gh prints the PR url on success
+        if tr:
+            evs.append(tr)
+    if outcomes.TEST_CMD_RX.search(cmd):
+        verdict = outcomes.parse_test_output(
+            outcomes.response_text(payload.get("tool_response")))
+        if verdict:
+            evs.append({"type": "sweep.completed",
+                        "actor": actor_id(payload), "anchor": {},
+                        "value": verdict["value"], "corr": corr,
+                        "payload": {"subtype": "tests",
+                                    "passed": verdict["passed"],
+                                    "failed": verdict["failed"],
+                                    "command": cmd[:200]}})
+    if outcomes.COMMIT_CMD_RX.search(cmd) and ctx.get("toplevel"):
+        cwd = payload.get("cwd") or os.getcwd()
+        heads = _load_stamp("head", s8)
+        prev = heads.get(ctx["toplevel"])
+        sha = _git(cwd, "rev-parse", "HEAD")
+        if sha and sha != prev:
+            heads[ctx["toplevel"]] = sha
+            _write_json(_stamp("head", s8), heads)
+            email, subject, files, adds, dels = outcomes.parse_commit_show(
+                _git(cwd, "show", "--shortstat", "--format=%ae%x1f%s",
+                     "HEAD"))
+            # a HEAD that moved to someone else's commit (a pull inside a
+            # merge command, say) is not this session's outcome
+            if prev is not None and (not ctx.get("git_email")
+                                     or email == ctx["git_email"]):
+                pay = {"sha": sha, "branch": ctx.get("branch", "")}
+                if files is not None:
+                    pay.update(files=files, adds=adds, dels=dels)
+                commits.append({"type": "vcs.commit",
+                                "actor": actor_id(payload), "anchor": {},
+                                "value": (subject or sha[:8])[:500],
+                                "corr": corr, "payload": pay})
+    return evs, commits
+
+
 def presence_job(payload, ctx, event):
     """Build the presence part of a child job, or None. `branch` rides every
     presence event as payload.branch: that is what drives the server's trail
@@ -524,16 +654,31 @@ def parent():
     if event == "PostToolUse":
         spool_touch(payload, ctx)
 
+    outs, commits = [], []
+    if event == "UserPromptSubmit":
+        outs = prompt_events(payload)
+    elif event == "Notification":
+        tr = _transition(payload, "waiting")
+        outs = [tr] if tr else []
+    elif event == "SessionStart":
+        seed_head(cwd, ctx, s8)
+    elif event == "SessionEnd":
+        tr = _transition(payload, "end")
+        outs = [tr] if tr else []
+    elif event == "PostToolUse" and payload.get("tool_name") == "Bash":
+        outs, commits = bash_events(payload, ctx)
+
     pres = presence_job(payload, ctx, event) \
         if event != "PostToolUse" or \
         (payload.get("tool_name") in EDIT_TOOLS) else None
     do_flush = attention.flush_due(SPOOL_DIR, s8, event)
-    if not pres and not do_flush:
+    if not pres and not do_flush and not outs and not commits:
         return                                   # spool-only: no fork
     spawn_child({"origin": ctx.get("origin", ""), "sess8": s8,
                  "corr": (payload.get("session_id") or "")[:120],
                  "event": event, "presence": pres,
                  "flush": bool(do_flush),
+                 "outcomes": outs, "commits": commits,
                  "final": event == "SessionEnd",
                  # every job carries the whole root meta + the inputs the
                  # child needs to resolve model, so any child can notice
@@ -550,11 +695,33 @@ def purge_session_files(spool, sess8_):
     """Session over: drop its spool and its per-session caches."""
     for p in (spool, spool + ".last-flush",
               os.path.join(CACHE_DIR, "model.%s.json" % sess8_),
-              _meta_stamp_path(sess8_)):
+              _meta_stamp_path(sess8_),
+              _stamp("intent", sess8_), _stamp("status", sess8_),
+              _stamp("head", sess8_)):
         try:
             os.remove(p)
         except OSError:
             pass
+
+
+def ensure_focus_type(server, token, base, mapname):
+    """attention.focus is a per-map custom type; register it before it rides
+    a batch (an unknown type 400s the whole batch). Stamped per map, forever
+    — the registration persists server-side."""
+    try:
+        reg = json.load(open(os.path.join(CACHE_DIR, "focus-types.json")))
+    except (OSError, ValueError):
+        reg = {}
+    if not isinstance(reg, dict):
+        reg = {}
+    if reg.get(mapname):
+        return True
+    if http(server, token, "POST", base + "/event-types",
+            FOCUS_TYPE_DEF) is None:
+        return False
+    reg[mapname] = time.time()
+    _write_json(os.path.join(CACHE_DIR, "focus-types.json"), reg)
+    return True
 
 
 def child(jobfile):
@@ -616,6 +783,16 @@ def child(jobfile):
     if not root_sent:
         refresh_actor_meta(server, token, base, s8,
                            job.get("actor_name", ""), meta)
+
+    # intent + status outcomes ride the main batch: task.status and
+    # sweep.completed are original builtins every events-capable server
+    # knows. attention.focus is per-map custom — drop it if registration
+    # can't be confirmed rather than 400 the whole batch.
+    outs = list(job.get("outcomes") or [])
+    if any(e.get("type") == "attention.focus" for e in outs) \
+            and not ensure_focus_type(server, token, base, mapname):
+        outs = [e for e in outs if e.get("type") != "attention.focus"]
+    events.extend(outs)
 
     leftover = []
     claim_path = None
@@ -681,6 +858,18 @@ def child(jobfile):
             if http(server, token, "POST", base + "/events",
                     {"events": body}) is None:
                 dlog("content batch rejected: %d deltas dropped" % len(body))
+                break
+
+    # vcs.commit is a newer builtin: isolated for the same reason as
+    # content.delta — a server that predates it rejects the whole batch,
+    # and these are droppable (never re-spooled), so the miss costs only
+    # the commit chip, not the attention flush.
+    commit_evs = job.get("commits") or []
+    if commit_evs and ok:
+        for body in attention.split_batches(commit_evs, post_max=1)[0]:
+            if http(server, token, "POST", base + "/events",
+                    {"events": body}) is None:
+                dlog("vcs.commit batch rejected: %d dropped" % len(body))
                 break
 
     if claim_path:
