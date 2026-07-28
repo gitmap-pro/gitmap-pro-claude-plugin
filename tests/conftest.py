@@ -1,12 +1,42 @@
 import http.server
 import json
 import os
+import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+
+SCRIPT = os.path.join(os.path.dirname(__file__), "..", "scripts",
+                      "report.py")
+
+
+def run_hook(payload, timeout=15):
+    """Feed one hook payload through report.py as a real subprocess."""
+    p = subprocess.run([sys.executable, SCRIPT],
+                       input=json.dumps(payload).encode(),
+                       capture_output=True, timeout=timeout,
+                       env=os.environ.copy())
+    assert p.returncode == 0, p.stderr.decode()
+    return p
+
+
+def wait_for(pred, timeout=10.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def posted_events(stub, path_suffix="/events"):
+    return [e for r in stub.requests
+            if r["method"] == "POST" and r["path"].endswith(path_suffix)
+            for e in (r["body"] or {}).get("events", [])]
 
 
 class StubEventsAPI(http.server.BaseHTTPRequestHandler):

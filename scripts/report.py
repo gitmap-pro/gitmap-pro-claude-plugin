@@ -534,9 +534,12 @@ def bash_events(payload, ctx):
     evs, commits = [], []
     corr = (payload.get("session_id") or "")[:120]
     s8 = sess8(payload)
+    # gh prints the PR url on success; `gh pr create --web` finishes in the
+    # browser and prints none, a chosen miss — the session->PR join still
+    # picks the PR up from the branch
     if outcomes.PR_CREATE_RX.search(cmd) and "/pull/" in \
             outcomes.response_text(payload.get("tool_response")):
-        tr = _transition(payload, "pr")   # gh prints the PR url on success
+        tr = _transition(payload, "pr")
         if tr:
             evs.append(tr)
     if outcomes.TEST_CMD_RX.search(cmd):
@@ -556,6 +559,11 @@ def bash_events(payload, ctx):
         prev = heads.get(ctx["toplevel"])
         sha = _git(cwd, "rev-parse", "HEAD")
         if sha and sha != prev:
+            # re-read right before writing: two Bash hooks racing both saw
+            # the old HEAD, and only the first to stamp may post the commit
+            heads = _load_stamp("head", s8)
+            if heads.get(ctx["toplevel"]) == sha:
+                return evs, commits
             heads[ctx["toplevel"]] = sha
             _write_json(_stamp("head", s8), heads)
             email, subject, files, adds, dels = outcomes.parse_commit_show(

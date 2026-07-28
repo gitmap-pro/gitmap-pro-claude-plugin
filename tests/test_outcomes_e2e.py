@@ -1,14 +1,11 @@
 """End-to-end for the intent/outcome emissions (codemap#267): hook stdin
 fixtures through report.py as a real subprocess, exact requests at the stub
 events API."""
-import json
-import os
 import subprocess
-import sys
 import time
 
-SCRIPT = os.path.join(os.path.dirname(__file__), "..", "scripts",
-                      "report.py")
+from conftest import posted_events, run_hook, wait_for
+
 SESS = "out26767-full-session-id"
 
 
@@ -16,30 +13,6 @@ def hook(event, repo, extra=None):
     d = {"hook_event_name": event, "session_id": SESS, "cwd": str(repo)}
     d.update(extra or {})
     return d
-
-
-def run_hook(payload, timeout=15):
-    p = subprocess.run([sys.executable, SCRIPT],
-                       input=json.dumps(payload).encode(),
-                       capture_output=True, timeout=timeout,
-                       env=os.environ.copy())
-    assert p.returncode == 0, p.stderr.decode()
-    return p
-
-
-def wait_for(pred, timeout=10.0):
-    end = time.time() + timeout
-    while time.time() < end:
-        if pred():
-            return True
-        time.sleep(0.05)
-    return False
-
-
-def posted_events(stub):
-    return [e for r in stub.requests
-            if r["method"] == "POST" and r["path"].endswith("/events")
-            for e in (r["body"] or {}).get("events", [])]
 
 
 def by_type(stub, type_):

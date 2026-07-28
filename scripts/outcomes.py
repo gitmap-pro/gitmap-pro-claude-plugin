@@ -27,12 +27,17 @@ COMMIT_CMD_RX = re.compile(          # (?<!-) skips flags like --rebase
 
 PR_CREATE_RX = re.compile(r"\bgh\s+pr\s+create\b")
 
+# Anchored to a command-segment start (line/;/&/|, then optional VAR=val
+# assignments and a path prefix) so `grep pytest notes.md` is not a test
+# run but `PYTHONPATH=src pytest -q` and `cd x && pytest` are.
+_SEG = r"(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*/)?"
 TEST_CMD_RX = re.compile(
-    r"\b(pytest|py\.test|jest|vitest|mocha|rspec|tox|nox|ctest"
+    _SEG +
+    r"(pytest|py\.test|jest|vitest|mocha|rspec|tox|nox|ctest"
     r"|go\s+test|cargo\s+(?:test|nextest)"
     r"|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b"
     r"|make\s+(?:test|check)\b"
-    r"|python3?\s+-m\s+(?:pytest|unittest))")
+    r"|python3?\s+-m\s+(?:pytest|unittest))", re.MULTILINE)
 
 
 def intent_line(prompt):

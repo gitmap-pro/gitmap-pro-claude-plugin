@@ -41,6 +41,13 @@ class TestCommandClassification:
         assert rx.search("yarn run test --watch=false")
         assert rx.search("go test ./...")
         assert rx.search("cargo test")
+        # segment-anchored: env prefixes, chains and paths still match...
+        assert rx.search("PYTHONPATH=src pytest -q")
+        assert rx.search("cd wt && pytest tests/")
+        assert rx.search("./node_modules/.bin/vitest run")
+        # ...but a test-runner name as an argument does not
+        assert not rx.search("grep pytest notes.md")
+        assert not rx.search("cat logs/pytest.log")
         assert not rx.search("git commit -m 'add tests'")
         assert not rx.search("echo testing")
 
